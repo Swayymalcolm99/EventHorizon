@@ -1,16 +1,11 @@
 const { rpc, xdr } = require('@stellar/stellar-sdk');
 const Trigger = require('../models/trigger.model');
-const axios = require('axios');
-const { sendEventNotification } = require('../services/email.service');
-const slackService = require('../services/slack.service');
-const telegramService = require('../services/telegram.service');
+const logger = require('../config/logger');
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const server = new rpc.Server(RPC_URL, {
     timeout: parseInt(process.env.RPC_TIMEOUT_MS || '10000', 10),
 });
-
-const logger = require('../config/logger');
 
 // --- Configuration ---
 const MAX_LEDGERS_PER_POLL = parseInt(process.env.MAX_LEDGERS_PER_POLL || '10000', 10);
@@ -44,7 +39,6 @@ async function withRetry(fn, { maxRetries = RPC_MAX_RETRIES, baseDelay = RPC_BAS
                 throw error;
             }
 
-            // Exponential backoff: 1s, 2s, 4s ...
             const delay = baseDelay * Math.pow(2, attempt);
             logger.warn(`RPC request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`, {
                 error: error.message,
@@ -58,58 +52,98 @@ async function withRetry(fn, { maxRetries = RPC_MAX_RETRIES, baseDelay = RPC_BAS
 
 // --- Action Execution ---
 
-async function executeTriggerAction(trigger, eventPayload) {
-    switch (trigger.actionType) {
-        case 'email': {
-            return sendEventNotification({
-                trigger,
-                payload: eventPayload,
-            });
-        }
-        case 'webhook': {
-            if (!trigger.actionUrl) {
-                throw new Error('Missing actionUrl for webhook trigger');
+// Try to load queue, fallback to direct execution if unavailable
+let enqueueAction;
+let queueAvailable = false;
+
+try {
+    const queue = require('./queue');
+    enqueueAction = queue.enqueueAction;
+    queueAvailable = true;
+    logger.info('Queue system available - actions will be processed in background');
+} catch (error) {
+    logger.warn('Queue system unavailable - actions will be executed directly', {
+        error: error.message,
+        note: 'Install Redis to enable background job processing'
+    });
+
+    // Fallback: direct execution with full action routing
+    const axios = require('axios');
+    const { sendEventNotification } = require('../services/email.service');
+    const { sendDiscordNotification } = require('../services/discord.service');
+    const slackService = require('../services/slack.service');
+    const telegramService = require('../services/telegram.service');
+
+    enqueueAction = async function executeTriggerActionDirect(trigger, eventPayload) {
+        const { actionType, actionUrl, contractId, eventName } = trigger;
+
+        logger.info('Executing action directly (no queue)', {
+            actionType,
+            contractId,
+            eventName,
+        });
+
+        switch (actionType) {
+            case 'email':
+                return await sendEventNotification({
+                    trigger,
+                    payload: eventPayload,
+                });
+
+            case 'discord':
+                if (!actionUrl) {
+                    throw new Error('Missing actionUrl for Discord trigger');
+                }
+                const discordPayload = {
+                    embeds: [{
+                        title: `Event: ${eventName}`,
+                        description: `Contract: ${contractId}`,
+                        fields: [{
+                            name: 'Payload',
+                            value: `\`\`\`json\n${JSON.stringify(eventPayload, null, 2).slice(0, 1000)}\n\`\`\``,
+                        }],
+                        color: 0x5865F2,
+                        timestamp: new Date().toISOString(),
+                    }],
+                };
+                return await sendDiscordNotification(actionUrl, discordPayload);
+
+            case 'slack':
+                return await slackService.execute(trigger, eventPayload);
+
+            case 'telegram': {
+                const botToken = process.env.TELEGRAM_BOT_TOKEN;
+                const chatId = actionUrl; // actionUrl stores the chat ID for telegram triggers
+                if (!botToken || !chatId) {
+                    throw new Error('Missing TELEGRAM_BOT_TOKEN or actionUrl (chatId) for telegram trigger');
+                }
+                const message = [
+                    '🔔 *EventHorizon Alert*',
+                    '',
+                    `*Event:* ${telegramService.escapeMarkdownV2(eventName)}`,
+                    `*Contract:* \`${telegramService.escapeMarkdownV2(contractId)}\``,
+                    '',
+                    `\`\`\`json`,
+                    telegramService.escapeMarkdownV2(JSON.stringify(eventPayload, null, 2)),
+                    `\`\`\``,
+                ].join('\n');
+                return await telegramService.sendTelegramMessage(botToken, chatId, message);
             }
-            return axios.post(trigger.actionUrl, {
-                contractId: trigger.contractId,
-                eventName: trigger.eventName,
-                payload: eventPayload,
-            });
+
+            case 'webhook':
+                if (!actionUrl) {
+                    throw new Error('Missing actionUrl for webhook trigger');
+                }
+                return await axios.post(actionUrl, {
+                    contractId,
+                    eventName,
+                    payload: eventPayload,
+                });
+
+            default:
+                throw new Error(`Unsupported action type: ${actionType}`);
         }
-        case 'discord': {
-            if (!trigger.actionUrl) {
-                throw new Error('Missing actionUrl for discord trigger');
-            }
-            return axios.post(trigger.actionUrl, {
-                contractId: trigger.contractId,
-                eventName: trigger.eventName,
-                payload: eventPayload,
-            });
-        }
-        case 'slack': {
-            return slackService.execute(trigger, eventPayload);
-        }
-        case 'telegram': {
-            const botToken = process.env.TELEGRAM_BOT_TOKEN;
-            const chatId = trigger.actionUrl; // actionUrl stores the chat ID for telegram triggers
-            if (!botToken || !chatId) {
-                throw new Error('Missing TELEGRAM_BOT_TOKEN or actionUrl (chatId) for telegram trigger');
-            }
-            const text = [
-                '🔔 *EventHorizon Alert*',
-                '',
-                `*Event:* ${telegramService.escapeMarkdownV2(trigger.eventName)}`,
-                `*Contract:* \`${telegramService.escapeMarkdownV2(trigger.contractId)}\``,
-                '',
-                `\`\`\`json`,
-                telegramService.escapeMarkdownV2(JSON.stringify(eventPayload, null, 2)),
-                `\`\`\``,
-            ].join('\n');
-            return telegramService.sendTelegramMessage(botToken, chatId, text);
-        }
-        default:
-            throw new Error(`Unsupported action type: ${trigger.actionType}`);
-    }
+    };
 }
 
 /**
@@ -122,7 +156,7 @@ async function executeWithRetry(trigger, eventPayload) {
     let lastError;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            await executeTriggerAction(trigger, eventPayload);
+            await enqueueAction(trigger, eventPayload);
             return { success: true };
         } catch (error) {
             lastError = error;
@@ -283,16 +317,18 @@ function start() {
         rpcUrl: RPC_URL,
         maxLedgersPerPoll: MAX_LEDGERS_PER_POLL,
         rpcMaxRetries: RPC_MAX_RETRIES,
+        queueEnabled: queueAvailable,
     });
 
     setInterval(pollEvents, pollInterval);
 
     logger.info('Event poller worker started successfully', {
-        intervalMs: pollInterval
+        intervalMs: pollInterval,
+        mode: queueAvailable ? 'background-queue' : 'direct-execution',
     });
 }
 
 module.exports = {
     start,
-    executeTriggerAction,
+    enqueueAction,
 };

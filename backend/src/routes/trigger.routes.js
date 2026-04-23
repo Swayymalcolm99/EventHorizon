@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const triggerController = require('../controllers/trigger.controller');
+const auditMiddleware = require('../middleware/audit.middleware');
 const {
     validateBody,
     validationSchemas,
@@ -56,6 +57,7 @@ const {
  */
 router.post(
     '/',
+    auditMiddleware.auditCreate(),
     validateBody(validationSchemas.triggerCreate),
     triggerController.createTrigger
 );
@@ -86,7 +88,10 @@ router.get('/', triggerController.getTriggers);
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.delete('/:id', triggerController.deleteTrigger);
+router.delete('/:id',
+    auditMiddleware.auditDelete(),
+    triggerController.deleteTrigger
+);
 
 /**
  * @openapi
@@ -129,6 +134,9 @@ router.delete('/:id', triggerController.deleteTrigger);
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.put('/:id', triggerController.updateTrigger);
+router.put('/:id',
+    auditMiddleware.auditUpdate(),
+    triggerController.updateTrigger
+);
 
 module.exports = router;

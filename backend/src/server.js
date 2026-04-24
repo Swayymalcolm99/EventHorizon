@@ -35,12 +35,20 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 // Database Connection
 mongoose
     .connect(process.env.MONGO_URI)
-    .then(() => {
+    .then(async () => {
         logger.info('Connected to MongoDB', {
             database: 'MongoDB',
             status: 'connected',
             uri: process.env.MONGO_URI?.replace(/\/\/.*@/, '//***@'),
         });
+
+        // Initialize Vault
+        try {
+            const vaultService = require('./services/vault.service');
+            await vaultService.initialize();
+        } catch (error) {
+            logger.error('Vault initialization failed', { error: error.message });
+        }
 
         let worker = null;
 

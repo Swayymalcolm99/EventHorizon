@@ -127,6 +127,11 @@ async function executeBatchAction(trigger, eventPayloads) {
     const { actionType, actionUrl, contractId, eventName, batchingConfig } = trigger;
     const continueOnError = batchingConfig?.continueOnError ?? true;
 
+    // Special handling for optimized webhook batching
+    if (actionType === 'webhook') {
+        return await executeWebhookBatchAction(trigger, eventPayloads);
+    }
+
     const results = {
         total: eventPayloads.length,
         successful: 0,
@@ -194,28 +199,6 @@ async function executeBatchAction(trigger, eventPayloads) {
                     break;
                 }
 
-                case 'webhook': {
-                    if (!actionUrl) {
-                        throw new Error('Missing actionUrl for webhook trigger');
-                    }
-
-                    const payload = {
-                        contractId,
-                        eventName,
-                        payload: eventPayload,
-                        batchIndex: i,
-                        batchSize: eventPayloads.length,
-                        batchPayloads: eventPayloads, // Send the full batch for webhooks
-                    };
-
-                    await webhookService.sendSignedWebhook(
-                        actionUrl,
-                        payload,
-                        trigger.webhookSecret
-                    );
-                    break;
-                }
-
                 default:
                     throw new Error(`Unsupported action type: ${actionType}`);
             }
@@ -258,6 +241,65 @@ async function executeBatchAction(trigger, eventPayloads) {
     }
 
     return results;
+}
+
+/**
+ * Execute a single-request webhook batch for network throughput optimization
+ */
+async function executeWebhookBatchAction(trigger, eventPayloads) {
+    const { actionUrl, contractId, eventName } = trigger;
+
+    if (!actionUrl) {
+        throw new Error('Missing actionUrl for webhook trigger');
+    }
+
+    const batchPayload = {
+        contractId,
+        eventName,
+        isBatch: true,
+        batchSize: eventPayloads.length,
+        events: eventPayloads.map((payload, index) => ({
+            payload,
+            index,
+            timestamp: new Date().toISOString()
+        }))
+    };
+
+    logger.debug('Sending optimized webhook batch', {
+        url: actionUrl,
+        batchSize: eventPayloads.length,
+        contractId,
+        eventName
+    });
+
+    try {
+        const response = await webhookService.sendSignedWebhook(
+            actionUrl,
+            batchPayload,
+            trigger.webhookSecret
+        );
+
+        return {
+            total: eventPayloads.length,
+            successful: eventPayloads.length,
+            failed: 0,
+            status: response.status
+        };
+    } catch (error) {
+        logger.error('Optimized webhook batch failed', {
+            url: actionUrl,
+            batchSize: eventPayloads.length,
+            error: error.message
+        });
+
+        // For webhooks, we fail the entire batch if the request fails
+        return {
+            total: eventPayloads.length,
+            successful: 0,
+            failed: eventPayloads.length,
+            error: error.message
+        };
+    }
 }
 
 /**
@@ -334,4 +376,8 @@ function createWorker() {
 module.exports = {
     createWorker,
     connection,
+    executeAction,
+    executeSingleAction,
+    executeBatchAction,
+    executeWebhookBatchAction
 };

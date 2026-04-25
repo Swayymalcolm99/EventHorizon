@@ -1,6 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const logger = require('../config/logger');
+const breakers = require('./circuitBreaker');
 
 /**
  * Webhook service for secure outbound webhook delivery with HMAC signing
@@ -49,11 +50,17 @@ class WebhookService {
         });
 
         try {
-            const response = await axios.post(url, payload, {
-                headers,
-                timeout: options.timeout || 30000, // 30 second timeout
-                ...options
-            });
+            const breakerKey = `webhook:${url}`;
+            const response = await breakers.fire(
+                breakerKey,
+                (postUrl, postPayload, postConfig) => axios.post(postUrl, postPayload, postConfig),
+                [url, payload, {
+                    headers,
+                    timeout: options.timeout || 30000, // 30 second timeout
+                    ...options
+                }],
+                { timeout: options.timeout || 30000 }
+            );
 
             logger.info('Webhook sent successfully', {
                 url,

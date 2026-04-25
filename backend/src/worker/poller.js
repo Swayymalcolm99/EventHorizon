@@ -72,6 +72,7 @@ try {
 
     // Fallback: direct execution with full action routing
     const axios = require('axios');
+    const breakers = require('../services/circuitBreaker');
     const { sendEventNotification } = require('../services/email.service');
     const { sendDiscordNotification } = require('../services/discord.service');
     const slackService = require('../services/slack.service');
@@ -137,11 +138,15 @@ try {
                 if (!actionUrl) {
                     throw new Error('Missing actionUrl for webhook trigger');
                 }
-                return await axios.post(actionUrl, {
-                    contractId,
-                    eventName,
-                    payload: eventPayload,
-                });
+                return await breakers.fire(
+                    `webhook:${actionUrl}`,
+                    (url, body) => axios.post(url, body),
+                    [actionUrl, {
+                        contractId,
+                        eventName,
+                        payload: eventPayload,
+                    }]
+                );
 
             default:
                 throw new Error(`Unsupported action type: ${actionType}`);

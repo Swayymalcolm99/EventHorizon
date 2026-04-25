@@ -9,6 +9,7 @@ members = [
     "escrow",
     "amm_pool",
     "dao_governance",
+    "dao_whitelist",
     "lending_base",
     "subscriptions",
     "nft_factory",
@@ -19,6 +20,7 @@ members = [
     "emitter_registry",
     "flash_loan",
     "royalty_registry",
+    "rwa_registry",
 ]
 
 [profile.release]

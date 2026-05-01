@@ -111,7 +111,8 @@ async function executeSingleAction(trigger, eventPayload) {
             return await webhookService.sendSignedWebhook(
                 actionUrl,
                 payload,
-                trigger.webhookSecret
+                trigger.webhookSecret,
+                { organizationId: trigger.organization }
             );
         }
 
@@ -196,6 +197,29 @@ async function executeBatchAction(trigger, eventPayloads) {
                         `*Payload:*\n\`\`\`\n${JSON.stringify(eventPayload, null, 2)}\n\`\`\``;
 
                     await telegramService.sendTelegramMessage(botToken, chatId, message);
+                    break;
+                }
+
+                case 'webhook': {
+                    if (!actionUrl) {
+                        throw new Error('Missing actionUrl for webhook trigger');
+                    }
+
+                    const payload = {
+                        contractId,
+                        eventName,
+                        payload: eventPayload,
+                        batchIndex: i,
+                        batchSize: eventPayloads.length,
+                        batchPayloads: eventPayloads, // Send the full batch for webhooks
+                    };
+
+                    await webhookService.sendSignedWebhook(
+                        actionUrl,
+                        payload,
+                        trigger.webhookSecret,
+                        { organizationId: trigger.organization }
+                    );
                     break;
                 }
 

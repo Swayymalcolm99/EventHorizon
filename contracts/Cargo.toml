@@ -22,6 +22,7 @@ members = [
     "flash_loan",
     "flash_loan_registry",
     "royalty_registry",
+    "dividend_distribution",
     "stablecoin_emitter",
     "nft_royalty_emitter",
     "oracle_aggregator",
